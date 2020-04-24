@@ -388,7 +388,7 @@ object CatIncremental extends App {
     args match {
       case file :: Nil =>
         val resource = ZManaged.make(FileHandle.open(file))(_.close.ignore)
-        (resource.use(cat) as 0 ) orElse ZIO.succeed(1)
+        (resource.use(cat) as 0) orElse ZIO.succeed(1)
       case _ => putStrLn("Usage: cat <file>") as 2
     }
 }
@@ -427,14 +427,15 @@ object AlarmAppImproved extends App {
     */
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = {
     val printDot = putStr(".").repeat(Schedule.spaced(1 second)).ignore
-    def printFinal[U, V](fiber : Fiber[U, V])(duration: Duration) = for {
-      timerFiber <- (ZIO.succeed(1) delay duration).fork
-      _ <- timerFiber.join
-      _ <- fiber.interrupt 
-      _ <- putStrLn("Time to wakeup!!!")
-    } yield (timerFiber)
+    def printFinal[U, V](fiber: Fiber[U, V])(duration: Duration) =
+      for {
+        timerFiber <- (ZIO.succeed(1) delay duration).fork
+        _ <- timerFiber.join
+        _ <- fiber.interrupt
+        _ <- putStrLn("Time to wakeup!!!")
+      } yield (timerFiber)
 
-    val program = for { 
+    val program = for {
       duration <- getAlarmDuration
       dotPrintFiber <- printDot.fork
       finalPrintFiber <- printFinal(dotPrintFiber)(duration)
@@ -455,7 +456,17 @@ object ComputePi extends App {
     * Some state to keep track of all points inside a circle,
     * and total number of points.
     */
-  final case class PiState(inside: Ref[Long], total: Ref[Long])
+  final case class PiState(inside: Ref[Long], total: Ref[Long]) {
+    def update(x: Double, y: Double) = {
+      val updateNewTotal = total.update(value => value + 1)
+      val updateNewInside = inside.update(
+        value =>
+          if (insideCircle(x, y)) { value + 1 }
+          else { value }
+      )
+      updateNewInside zip updateNewTotal
+    }
+  }
 
   /**
     * A function to estimate pi.
@@ -477,13 +488,42 @@ object ComputePi extends App {
     nextDouble zip nextDouble
 
   /**
+    * Takes an effect and produces a new effect that corresponds to the initial effect that
+    * will run m times in parallel
+    *
+    * @param m the number of forks
+    * @param effect the initial effect to parallelize
+    * @return URIO[R, Fiber[E, List[A]]]
+    */
+  def forkM[R, E, A](m: Int)(effect: ZIO[R, E, A]) = {
+    ZIO.forkAll(ZIO.replicate(m)(effect))
+  }
+
+  /**
     * EXERCISE
     *
     * Build a multi-fiber program that estimates the value of `pi`. Print out
     * ongoing estimates continuously until the estimation is complete.
     */
-  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = {
+    val initialState =
+      (Ref.make(0L) zip Ref.make(0L)).map[PiState](x => PiState(x._1, x._2))
+    val step = (s: PiState) =>
+      for {
+        r <- randomPoint
+        _ <- s.update(r._1, r._2)
+      } yield ()
+
+    for {
+      state <- initialState
+      fiber <- forkM(4)(ZIO.collectAll(ZIO.replicate(100000)(step(state))))
+      _ <- fiber.join
+      inside <- state.inside.get
+      total <- state.total.get
+      pi = estimatePi(inside, total)
+      _ <- putStrLn(s"PI: $pi \t Inside: $inside \t Total: $total")
+    } yield 0
+  }
 }
 
 object StmSwap extends App {
@@ -522,7 +562,12 @@ object StmSwap extends App {
     */
   def exampleStm = {
     def swap[A](ref1: TRef[A], ref2: TRef[A]): UIO[Unit] =
-      ???
+      (for {
+        val1 <- ref1.get
+        val2 <- ref2.get
+        _ <- ref1.set(val2)
+        _ <- ref2.set(val1)
+      } yield ()).commit
 
     for {
       ref1 <- TRef.make(100).commit
@@ -549,11 +594,27 @@ object StmLock extends App {
     * acquisition, and release methods.
     */
   class Lock private (tref: TRef[Boolean]) {
-    def acquire: UIO[Unit] = ???
-    def release: UIO[Unit] = ???
+    def acquire: UIO[Unit] = {
+      (for {
+        isLocked <- tref.get
+        if !isLocked
+        _ <- tref.set(true)
+
+      } yield ()).commit
+    }
+    def release: UIO[Unit] = {
+      (for {
+        isLocked <- tref.get
+        if isLocked
+        _ <- tref.set(false)
+
+      } yield ()).commit
+    }
   }
   object Lock {
-    def make: UIO[Lock] = ???
+    def make: UIO[Lock] = {
+      TRef.make(false).map(new Lock(_)).commit
+    }
   }
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
@@ -568,7 +629,7 @@ object StmLock extends App {
         .repeat(Schedule.recurs(10))
         .fork
       _ <- (fiber1 zip fiber2).join
-    } yield 0) as 1
+    } yield ()) as 0
 }
 
 object StmQueue extends App {
@@ -582,11 +643,15 @@ object StmQueue extends App {
     * Using STM, implement a async queue with double back-pressuring.
     */
   class Queue[A] private (capacity: Int, queue: TRef[ScalaQueue[A]]) {
-    def take: UIO[A] = ???
-    def offer(a: A): UIO[Unit] = ???
+    def take: UIO[A] = queue.modify(q => q.dequeue).commit
+    def offer(a: A): UIO[Unit] = queue.modify(q => ((), q.enqueue(a))).commit
   }
   object Queue {
-    def make[A]: UIO[Queue[A]] = ???
+    def make[A]: UIO[Queue[A]] = TRef
+                                  .make(ScalaQueue.empty[A])
+                                  .map(x => new Queue(0, x))
+                                  .commit
+
   }
 
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
